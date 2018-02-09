@@ -256,7 +256,6 @@ class MinibufferInput(QLineEdit):
 
 
 def _update_minibuffer_height(var):
-    from .. import windows
     for window in windows():
         window.minibuffer().set_height(var.value)
 

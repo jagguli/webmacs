@@ -21,6 +21,7 @@ from PyQt5.QtWebChannel import QWebChannel
 from collections import namedtuple
 
 from .keymaps import KeyPress, BUFFER_KEYMAP as KEYMAP
+from . import hooks
 from . import current_window, BUFFERS, current_minibuffer, \
     minibuffer_show_info, current_buffer
 from .content_handler import WebContentHandler
@@ -56,6 +57,7 @@ def close_buffer(wb, keep_one=True):
     app().download_manager().detach_buffer(wb)
     BUFFERS.remove(wb)
     wb.deleteLater()
+    hooks.webbuffer_closed(wb)
     Minibuffer.update_rlabel()
     return True
 
@@ -81,6 +83,7 @@ class WebBuffer(QWebEnginePage):
         # put the most recent buffer at the beginning of the BUFFERS list
         BUFFERS.insert(0, self)
         Minibuffer.update_rlabel()
+        hooks.webbuffer_created(self)
 
         self.fullScreenRequested.connect(self._on_full_screen_requested)
         self._content_handler = WebContentHandler(self)

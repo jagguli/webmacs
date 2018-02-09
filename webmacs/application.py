@@ -24,9 +24,11 @@ from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWidgets import QApplication
 
 from . import require, GLOBAL_EVENT_FILTER
+from .version import opengl_vendor
 from .adblock import Adblocker, AdblockUpdaterThread
 from .download_manager import DownloadManager
 from .profile import default_profile
+from .minibuffer.right_label import init_minibuffer_right_labels
 
 
 if sys.platform.startswith("linux"):
@@ -87,6 +89,18 @@ class Application(QApplication):
     def __init__(self, args):
         QApplication.__init__(self, args)
         self.__class__.INSTANCE = self
+
+        if (opengl_vendor() == 'nouveau' and
+            not (os.environ.get('LIBGL_ALWAYS_SOFTWARE') == '1'
+                 or 'QT_XCB_FORCE_SOFTWARE_OPENGL' in os.environ)):
+            sys.exit(
+                "You are using the nouveau graphics driver but it"
+                " has issues with multithreaded opengl. You must"
+                " use another driver or set the variable environment"
+                " QT_XCB_FORCE_SOFTWARE_OPENGL to force software"
+                " opengl. Note that it might be slow, depending"
+                " on your hardware."
+            )
 
         with open(os.path.join(THIS_DIR, "app_style.css")) as f:
             self.setStyleSheet(f.read())
@@ -174,3 +188,6 @@ class Application(QApplication):
         )
         self._adblock_thread.start()
         logging.debug("starting adblock update")
+
+    def post_init(self):
+        init_minibuffer_right_labels()

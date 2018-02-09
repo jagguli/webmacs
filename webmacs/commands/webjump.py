@@ -15,7 +15,6 @@
 
 import logging
 from collections import namedtuple
-from urllib.parse import urlparse
 
 from PyQt5.QtCore import QUrl, QThread, pyqtSlot as Slot, \
     pyqtSignal as Signal, QStringListModel, QObject
@@ -23,8 +22,7 @@ from PyQt5.QtCore import QUrl, QThread, pyqtSlot as Slot, \
 
 from ..minibuffer.prompt import Prompt, PromptTableModel, PromptHistory
 from ..commands import define_command
-from ..webbuffer import create_buffer
-from .. import current_window, current_buffer
+from .. import current_buffer
 from ..application import app
 from .prompt_helper import PromptNewBuffer
 from .. import variables
@@ -45,6 +43,7 @@ webjump_default = variables.define_variable(
         ),
     ),
 )
+
 
 def define_webjump(name, url, doc="", complete_fn=None):
     """
@@ -188,9 +187,13 @@ def get_url(value):
     try:
         webjump = WEBJUMPS[command]
     except KeyError:
-        url = urlparse(value)
-        if '.' in url.path and value[0] != ' ' and not url.scheme:
-            return 'https://' + value
+        if "://" not in value:
+            url = QUrl.fromUserInput(value)
+            if url.isValid():
+                # default scheme is https for us
+                if url.scheme() == "http":
+                    url.setScheme("https")
+                return url
         return value
 
     if webjump.allow_args:
@@ -215,14 +218,11 @@ def go_to_selected_url(prompt):
     """
     Prompt (defaulting to current selection) to open an url or a webjump.
     """
-    url = get_url(prompt.value())
-    if url:
-        prompt.get_buffer().load(url)
+    go_to(prompt)
 
 
 class WebJumpPromptNewUrl(WebJumpPrompt):
-    force_new_buffer = False
-    label = "url/webjump (new-buffer):"
+    force_new_buffer = True
 
 
 @define_command("go-to-new-buffer", prompt=WebJumpPromptNewUrl)
@@ -230,26 +230,22 @@ def go_to_new_buffer(prompt):
     """
     Prompt to open an url or webjump in a new buffer.
     """
-    url = get_url(prompt.value())
-    if url:
-        view = current_window().current_web_view()
-        view.setBuffer(create_buffer(url))
+    go_to(prompt)
 
 
 class WebJumpPromptCurrentUrlNewBuffer(WebJumpPromptCurrentUrl):
-    force_new_buffer = False
-    label = "url/webjump (new-buffer):"
+    force_new_buffer = True
 
 
-@define_command("go-to-selected-url-new-buffer", prompt=WebJumpPromptCurrentUrlNewBuffer)
+@define_command(
+    "go-to-selected-url-new-buffer",
+    prompt=WebJumpPromptCurrentUrlNewBuffer
+)
 def go_to_selected_url_new_buffer(prompt):
     """
     Prompt (defaulting to current selection) to open an url or a webjump.
     """
-    url = get_url(prompt.value())
-    view = current_window().current_web_view()
-    if url:
-        view.setBuffer(create_buffer(url))
+    go_to(prompt)
 
 
 @define_command("search-default", prompt=DefaultSearchPrompt)
@@ -261,8 +257,7 @@ def search_default(prompt):
 
 
 class DefaultSearchPromptNewBuffer(DefaultSearchPrompt):
-    force_new_buffer = False
-    label = "url/webjump (new-buffer):"
+    force_new_buffer = True
 
 
 @define_command(
