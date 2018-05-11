@@ -24,6 +24,7 @@ from .autofill import Autofill
 from .autofill.db import PasswordDb
 from .ignore_certificates import IgnoredCertificates
 from .bookmarks import Bookmarks
+from . import variables
 
 
 THIS_DIR = os.path.dirname(os.path.realpath(__file__))
@@ -38,6 +39,11 @@ class Profile(object):
         self.q_profile = q_profile
 
         self._scheme_handlers = {}  # keep a python reference
+
+    def update_spell_checking(self):
+        dicts = variables.get("spell-checking-dictionaries")
+        self.q_profile.setSpellCheckEnabled(bool(dicts))
+        self.q_profile.setSpellCheckLanguages(dicts)
 
     def enable(self, app):
         path = os.path.join(app.profiles_path(), self.name)
@@ -71,11 +77,16 @@ class Profile(object):
             app.download_manager().download_requested
         )
 
+        self.update_spell_checking()
+
         def inject_js(filepath, ipoint=QWebEngineScript.DocumentCreation,
-                      iid=QWebEngineScript.ApplicationWorld, sub_frames=False):
+                      iid=QWebEngineScript.ApplicationWorld, sub_frames=False,
+                      script_transform=None):
             f = QFile(filepath)
             assert f.open(QFile.ReadOnly | QFile.Text)
             src = QTextStream(f).readAll()
+            if script_transform:
+                src = script_transform(src)
 
             script = QWebEngineScript()
             script.setInjectionPoint(ipoint)
@@ -85,24 +96,27 @@ class Profile(object):
             self.q_profile.scripts().insert(script)
 
         inject_js(":/qtwebchannel/qwebchannel.js")
-        inject_js(os.path.join(THIS_DIR, "scripts", "setup.js"),
-                  sub_frames=True)
-        inject_js(os.path.join(THIS_DIR, "scripts", "hint.js"))
-        inject_js(os.path.join(THIS_DIR, "scripts", "textedit.js"))
+
+        contentjs = ["WEBMACS_SECURE_ID = {};".format(str(id(self)))]
+        with open(os.path.join(THIS_DIR, "scripts", "setup.js")) as f:
+            contentjs.append(f.read())
+        with open(os.path.join(THIS_DIR, "scripts", "textedit.js")) as f:
+            contentjs.append(f.read())
+        with open(os.path.join(THIS_DIR, "scripts", "hint.js")) as f:
+            contentjs.append(f.read())
+        with open(os.path.join(THIS_DIR, "scripts", "textzoom.js")) as f:
+            contentjs.append(f.read())
+        with open(os.path.join(THIS_DIR, "scripts", "caret_browsing.js")) as f:
+            contentjs.append(f.read())
+
+        script = QWebEngineScript()
+        script.setInjectionPoint(QWebEngineScript.DocumentCreation)
+        script.setSourceCode("\n".join(contentjs))
+        script.setWorldId(QWebEngineScript.ApplicationWorld)
+        script.setRunsOnSubFrames(True)
+        self.q_profile.scripts().insert(script)
+
         inject_js(os.path.join(THIS_DIR, "scripts", "autofill.js"))
-        inject_js(os.path.join(THIS_DIR, "scripts", "caret_browsing.js"))
-
-    def load_session(self):
-        from .session import Session
-        if os.path.exists(self.session_file):
-            with open(self.session_file, "r") as f:
-                Session.load(f).apply()
-                return True
-
-    def save_session(self):
-        from .session import Session
-        with open(self.session_file, "w") as f:
-            Session().save(f)
 
 
 def default_profile():

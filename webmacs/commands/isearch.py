@@ -20,38 +20,39 @@ from ..webbuffer import WebBuffer
 from ..commands import define_command
 from ..commands import caret_browsing as caret_browsing_commands
 from ..keymaps.caret_browsing import KEYMAP as CARET_BROWSING_KEYMAP
-from .. import current_minibuffer, current_buffer
 
 KEYMAP = Keymap("i-search", MKEYMAP)
 
 
+@KEYMAP.define_key("C-n")
 @KEYMAP.define_key("C-s")
-def search_next():
-    prompt = current_minibuffer().prompt()
+def search_next(ctx):
+    prompt = ctx.minibuffer.prompt()
     prompt.set_isearch_direction(0)
     prompt.find_text()
 
 
+@KEYMAP.define_key("C-p")
 @KEYMAP.define_key("C-r")
-def search_previous():
-    prompt = current_minibuffer().prompt()
+def search_previous(ctx):
+    prompt = ctx.minibuffer.prompt()
     prompt.set_isearch_direction(WebBuffer.FindBackward)
     prompt.find_text()
 
 
 @KEYMAP.define_key("Return")
-def validate():
-    buff = current_buffer()
+def validate(ctx):
+    buff = ctx.buffer
     buff.findText("")  # to clear the highlight
-    current_minibuffer().close_prompt()
+    ctx.minibuffer.close_prompt()
 
 
 @KEYMAP.define_key("C-g")
 @KEYMAP.define_key("Esc")
-def cancel():
-    prompt = current_minibuffer().prompt()
+def cancel(ctx):
+    prompt = ctx.minibuffer.prompt()
     scroll_pos = prompt.page_scroll_pos
-    validate()
+    validate(ctx)
     prompt.set_page_scroll_pos(scroll_pos)
 
 
@@ -64,10 +65,10 @@ class ISearchPrompt(Prompt):
     def enable(self, minibuffer):
         self._caret_browsing = local_keymap() == CARET_BROWSING_KEYMAP
         if self._caret_browsing:
-            caret_browsing_commands.shutdown()
+            caret_browsing_commands.shutdown(self.ctx)
         Prompt.enable(self, minibuffer)
         self._update_label()
-        self.page = current_buffer()
+        self.page = self.ctx.buffer
         self.page_scroll_pos = (0, 0)
         self.page.async_scroll_pos(
             lambda p: setattr(self, "page_scroll_pos", p))
@@ -100,11 +101,11 @@ class ISearchPrompt(Prompt):
         self.minibuffer.input().textChanged.disconnect(self.on_text_edited)
         Prompt.close(self)
         if self._caret_browsing:
-            caret_browsing_commands.init()
+            caret_browsing_commands.init(self.ctx)
 
 
 @define_command("i-search-forward", prompt=ISearchPrompt)
-def i_search_forward(prompt):
+def i_search_forward(ctx):
     """
     Begin an incremental search (forward).
     """
@@ -116,7 +117,7 @@ class ISearchPromptBackward(ISearchPrompt):
 
 
 @define_command("i-search-backward", prompt=ISearchPromptBackward)
-def i_search_backward(prompt):
+def i_search_backward(ctx):
     """
     Begin an incremental search (backward).
     """

@@ -20,12 +20,11 @@ import time
 from datetime import datetime, timezone
 import dateparser
 
-from PyQt5.QtCore import QThread, pyqtSignal as Signal
-
 from _adblock import AdBlock
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 from . import variables
+from .runnable import Runner
 
 
 DEFAULT_EASYLIST = (
@@ -140,19 +139,12 @@ class Adblocker(object):
             return adblock
 
 
-class AdblockUpdaterThread(QThread):
-    adblock_updated = Signal(object)
+class AdblockUpdateRunner(Runner):
+    description = "adblock updater"
 
-    def __init__(self, adblocker):
-        QThread.__init__(self)
-        self.moveToThread(self)
+    def __init__(self, adblocker, **kwargs):
+        Runner.__init__(self, **kwargs)
         self.adblocker = adblocker
 
-    def run(self):
-        try:
-            adblock = self.adblocker.maybe_update_adblock()
-        except Exception:
-            logging.exception("Unable to update ad block data.")
-            return
-        if adblock is not None:
-            self.adblock_updated.emit(adblock)
+    def run_in_thread(self):
+        return self.adblocker.maybe_update_adblock()

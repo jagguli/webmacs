@@ -15,47 +15,53 @@
 
 import logging
 
-from PyQt5.QtCore import QUrl, pyqtSlot as Slot, QEventLoop
+from PyQt5.QtCore import QUrl, pyqtSlot as Slot
 from PyQt5.QtWebEngineWidgets import QWebEnginePage, QWebEngineScript
 from PyQt5.QtWebChannel import QWebChannel
 from collections import namedtuple
 
-from .keymaps import KeyPress, BUFFER_KEYMAP as KEYMAP
+from .keymaps import BUFFER_KEYMAP as KEYMAP
 from . import hooks
-from . import current_window, BUFFERS, current_minibuffer, \
-    minibuffer_show_info, current_buffer
+from . import BUFFERS, current_minibuffer, minibuffer_show_info, \
+    current_buffer, call_later
 from .content_handler import WebContentHandler
 from .application import app
 from .minibuffer.prompt import YesNoPrompt
 from .minibuffer import Minibuffer
 from .autofill import FormData
 from .autofill.prompt import AskPasswordPrompt, SavePasswordPrompt
-from .keyboardhandler import send_key_event
-from .keymaps.webcontent_edit import KEYMAP as CONTENT_EDIT_KEYMAP
-from .keymaps.caret_browsing import KEYMAP as CARET_BROWSING_KEYMAP
+from .keyboardhandler import LOCAL_KEYMAP_SETTER
+from .mode import get_mode, Mode, get_auto_modename_for_url
+from .killed_buffers import KilledBuffer
 
 
 # a tuple of QUrl, str to delay loading of a page.
 DelayedLoadingUrl = namedtuple("DelayedLoadingUrl", ("url", "title"))
 
 
-def close_buffer(wb, keep_one=True):
-    if keep_one and len(BUFFERS) < 2:
-        return  # can't close if there is only one buffer left
-
-    if wb.view():
+def close_buffer(wb):
+    view = wb.view()
+    if view:
         # buffer is currently visible, search for a buffer that is not visible
         # yet to put it in the view
         invisibles = [b for b in BUFFERS if not b.view()]
         if not invisibles:
-            # all buffers have views, so close the view of our buffer first
-            current_window().close_view(wb.view())
+            if len(view.main_window.webviews()) > 1:
+                # we can close the current view if it is not alone
+                view.main_window.close_view(view)
+            else:
+                return
         else:
             # associate the first buffer that does not have any view yet
-            wb.view().setBuffer(invisibles[0])
+            view.setBuffer(invisibles[0])
+
+    internal_view = wb.internal_view()
+    if internal_view:
+        internal_view.deleteLater()
 
     app().download_manager().detach_buffer(wb)
     BUFFERS.remove(wb)
+    KilledBuffer.from_buffer(wb)
     wb.deleteLater()
     hooks.webbuffer_closed(wb)
     Minibuffer.update_rlabel()
@@ -66,10 +72,6 @@ class WebBuffer(QWebEnginePage):
     """
     Represent some web page content.
     """
-
-    KEYMAP_MODE_NORMAL = 1
-    KEYMAP_MODE_CONTENT_EDIT = 2
-    KEYMAP_MODE_CARET_BROWSING = 3
 
     LOGGER = logging.getLogger("webcontent")
     JSLEVEL2LOGGING = {
@@ -86,6 +88,7 @@ class WebBuffer(QWebEnginePage):
         hooks.webbuffer_created(self)
 
         self.fullScreenRequested.connect(self._on_full_screen_requested)
+        self.featurePermissionRequested.connect(self._on_feature_requested)
         self._content_handler = WebContentHandler(self)
         channel = QWebChannel(self)
         channel.registerObject("contentHandler", self._content_handler)
@@ -99,7 +102,9 @@ class WebBuffer(QWebEnginePage):
         self.titleChanged.connect(self.update_title)
         self.__authentication_data = None
         self.__delay_loading_url = None
-        self.__keymap_mode = self.KEYMAP_MODE_NORMAL
+        self.__keymap_mode = Mode.KEYMAP_NORMAL
+        self.__mode = get_mode("standard-mode")
+        self.__text_edit_mark = False
 
         if url:
             if isinstance(url, DelayedLoadingUrl):
@@ -107,9 +112,35 @@ class WebBuffer(QWebEnginePage):
             else:
                 self.load(url)
 
+    def internal_view(self):
+        return QWebEnginePage.view(self)
+
+    def view(self):
+        iv = self.internal_view()
+        if iv:
+            return iv.view()
+
+    @property
+    def mode(self):
+        return self.__mode
+
+    @property
+    def text_edit_mark(self):
+        return self.__text_edit_mark
+
+    def set_text_edit_mark(self, on):
+        self.__text_edit_mark = on
+
+    def set_mode(self, modename):
+        if self.__mode.name == modename:
+            return
+        old_mode = self.__mode
+        self.__mode = get_mode(modename)
+        LOCAL_KEYMAP_SETTER.buffer_mode_changed(self, old_mode)
+
     def load(self, url):
         if not isinstance(url, QUrl):
-            url = QUrl(url)
+            url = QUrl.fromUserInput(url)
         self.__delay_loading_url = None
         return QWebEnginePage.load(self, url)
 
@@ -137,23 +168,10 @@ class WebBuffer(QWebEnginePage):
             level = self.JSLEVEL2LOGGING.get(level, logging.ERROR)
             logger.log(level, message, extra={"url": self.url().toString()})
 
-    def keymap(self):
-        return KEYMAP
-
-    def content_edit_keymap(self):
-        return CONTENT_EDIT_KEYMAP
-
-    def caret_browsing_keymap(self):
-        return CARET_BROWSING_KEYMAP
-
     def active_keymap(self):
-        mode = self.__keymap_mode
-        if mode == self.KEYMAP_MODE_CONTENT_EDIT:
-            return self.content_edit_keymap()
-        elif mode == self.KEYMAP_MODE_CARET_BROWSING:
-            return self.caret_browsing_keymap()
-        return self.keymap()
+        return self.mode.keymap_for_mode(self.__keymap_mode)
 
+    @property
     def keymap_mode(self):
         return self.__keymap_mode
 
@@ -169,12 +187,14 @@ class WebBuffer(QWebEnginePage):
     def scroll_by(self, x=0, y=0):
         self.runJavaScript("window.scrollBy(%d, %d);" % (x, y))
 
-    def scroll_page(self, nb):
-        offset = -40 if nb > 0 else 40
-        self.runJavaScript("""""
-        window.scrollTo(0, window.pageYOffset
-                        + (window.innerHeight * %d) + %d);
-        """ % (nb, offset))
+    def scroll_page(self, nb, smooth=True):
+        self.runJavaScript("""
+        window.scroll({
+          top: window.pageYOffset + (window.innerHeight * %f),
+          left: 0,
+          behavior: '%s'
+        });
+        """ % (nb, "smooth" if smooth else "auto"))
 
     def scroll_top(self):
         self.runJavaScript("window.scrollTo(0, 0);")
@@ -204,10 +224,7 @@ class WebBuffer(QWebEnginePage):
 
     def focus_active_browser_object(self):
         current_buffer().runJavaScript(
-            "if (hints.activeHint) {"
-            "   clickLike(hints.activeHint.obj);"
-            "   true;"
-            " } else {false}",
+            "hints.followCurrentLink();",
             QWebEngineScript.ApplicationWorld)
 
     def select_visible_hint(self, hint_id):
@@ -217,15 +234,38 @@ class WebBuffer(QWebEnginePage):
 
     @Slot("QWebEngineFullScreenRequest")
     def _on_full_screen_requested(self, request):
-        view = self.view()
-        if not view:
+        internal_view = self.internal_view()
+        if not internal_view:
             return
-        if view.request_fullscreen(request.toggleOn()):
+        if internal_view.request_fullscreen(request.toggleOn()):
             request.accept()
+
+    @Slot(QUrl, QWebEnginePage.Feature)
+    def _on_feature_requested(self, url, feature):
+        features = ("Geolocation", "MediaAudioCapture", "MediaVideoCapture",
+                    "MediaAudioVideoCapture", "MouseLock",
+                    "DesktopVideoCapture", "DesktopAudioVideoCapture")
+
+        feature_name = None
+        for name in features:
+            if getattr(QWebEnginePage, name, None) == feature:
+                feature_name = name
+                break
+
+        permission = QWebEnginePage.PermissionDeniedByUser
+        if feature_name:
+            prompt = YesNoPrompt("Allow enabling feature {} for {}?"
+                                 .format(feature_name, url.toString()))
+            if current_minibuffer().do_prompt(prompt):
+                permission = QWebEnginePage.PermissionGrantedByUser
+        self.setFeaturePermission(url, feature, permission)
 
     def createWindow(self, type):
         buffer = create_buffer()
-        self.view().setBuffer(buffer)
+        view = self.view()
+        # this is required to to not lose the keyboard focus.
+        call_later(lambda: view.internal_view().setFocus())
+        view.setBuffer(buffer)
         return buffer
 
     def finished(self):
@@ -248,6 +288,8 @@ class WebBuffer(QWebEnginePage):
         else:
             app().download_manager().detach_buffer(self)
 
+        self.set_mode(get_auto_modename_for_url(self.url().toString()))
+
     def handle_authentication(self, url, authenticator):
         autofill = app().autofill()
         passwords = autofill.auth_passwords_for_url(url)
@@ -258,20 +300,13 @@ class WebBuffer(QWebEnginePage):
             return
 
         # ask authentication credentials
-        loop = QEventLoop()
         prompt = AskPasswordPrompt(autofill, self)
         current_minibuffer().do_prompt(prompt)
 
-        def save_auth():
-            data = self.__authentication_data = FormData(url, prompt.username,
-                                                         prompt.password, None)
-            authenticator.setUser(data.username)
-            authenticator.setPassword(data.password)
-            loop.quit()
-
-        prompt.closed.connect(save_auth)
-
-        loop.exec_()
+        data = self.__authentication_data = FormData(url, prompt.username,
+                                                     prompt.password, None)
+        authenticator.setUser(data.username)
+        authenticator.setPassword(data.password)
 
     def certificateError(self, error):
         url = "{}:{}".format(error.url().host(), error.url().port(80))
@@ -279,25 +314,18 @@ class WebBuffer(QWebEnginePage):
         if db.is_ignored(url):
             return True
 
-        loop = QEventLoop()
         prompt = YesNoPrompt("[certificate error] {} - ignore ? "
                              .format(error.errorDescription()))
         current_minibuffer().do_prompt(prompt)
 
-        prompt.closed.connect(loop.quit)
-        loop.exec_()
         if prompt.yes:
             db.ignore(url)
         return prompt.yes
 
     def javaScriptConfirm(self, url, msg):
-        loop = QEventLoop()
-        prompt = YesNoPrompt("[js-confirm] {} ".format(msg))
-        current_minibuffer().do_prompt(prompt)
-
-        prompt.closed.connect(loop.quit)
-        loop.exec_()
-        return prompt.yes
+        return current_minibuffer().do_prompt(
+            YesNoPrompt("[js-confirm] {} ".format(msg))
+        )
 
     def javaScriptAlert(self, url, msg):
         msg = "[js-alert] {}".format(msg)
@@ -306,11 +334,43 @@ class WebBuffer(QWebEnginePage):
     def on_url_hovered(self, url):
         minibuffer_show_info(url)
 
+    def main_window(self):
+        view = self.view()
+        if view:
+            return view.main_window
+
     def update_title(self, title=None):
         if self == current_buffer():
-            current_window().update_title(
+            self.main_window().update_title(
                 title if title is not None else self.title()
             )
+
+    def _incr_zoom(self, forward):
+        # Zooming constants
+        ZOOM_MIN = 25
+        ZOOM_MAX = 500
+        ZOOM_INC = 25
+
+        zoom = self.zoomFactor()*100
+        # We need to round up because the zoom factor is stored as a float
+        self.set_zoom(round(min(ZOOM_MAX, max(ZOOM_MIN, zoom +
+                                              (ZOOM_INC if forward
+                                               else -ZOOM_INC)))))
+
+    def set_zoom(self, zoom_factor):
+
+        if zoom_factor is not None:
+            self.setZoomFactor(zoom_factor/100)
+            minibuffer_show_info("Zoom level: %d%%" % (zoom_factor))
+
+    def zoom_in(self):
+        self._incr_zoom(True)
+
+    def zoom_out(self):
+        self._incr_zoom(False)
+
+    def zoom_normal(self):
+        self.set_zoom(100)
 
 
 # alias to create a web buffer
@@ -340,25 +400,16 @@ KEYMAP.define_key("C-x h", "select-buffer-content")
 KEYMAP.define_key("C", "caret-browsing-init")
 KEYMAP.define_key("m", "bookmark-open")
 KEYMAP.define_key("M", "bookmark-add")
-
-
-@KEYMAP.define_key("C-n")
-@KEYMAP.define_key("n")
-def send_down():
-    send_key_event(KeyPress.from_str("Down"))
-
-
-@KEYMAP.define_key("C-p")
-@KEYMAP.define_key("p")
-def send_up():
-    send_key_event(KeyPress.from_str("Up"))
-
-
-@KEYMAP.define_key("C-f")
-def send_right():
-    send_key_event(KeyPress.from_str("Right"))
-
-
-@KEYMAP.define_key("C-b")
-def send_left():
-    send_key_event(KeyPress.from_str("Left"))
+KEYMAP.define_key("C-+", "text-zoom-in")
+KEYMAP.define_key("C--", "text-zoom-out")
+KEYMAP.define_key("C-=", "text-zoom-reset")
+KEYMAP.define_key("+", "zoom-in")
+KEYMAP.define_key("-", "zoom-out")
+KEYMAP.define_key("0", "zoom-normal")
+KEYMAP.define_key("C-n", "send-key-down")
+KEYMAP.define_key("n", "send-key-down")
+KEYMAP.define_key("C-p", "send-key-up")
+KEYMAP.define_key("p", "send-key-up")
+KEYMAP.define_key("C-f", "send-key-right")
+KEYMAP.define_key("C-b", "send-key-left")
+KEYMAP.define_key("C-g", "buffer-unselect")

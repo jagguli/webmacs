@@ -15,11 +15,10 @@
 
 import importlib
 
-from PyQt5.QtCore import QObject, QEvent
-from PyQt5.QtGui import QWindow
+from PyQt5.QtCore import QObject, QEvent, QTimer
 
 
-__version__ = '0.1'
+__version__ = '0.5'
 
 
 # access to every opened buffers
@@ -33,33 +32,6 @@ def require(module, package=__package__):
         return importlib.import_module(module, package)
 
 
-# application level event filter. It will be set on the QApplication instance.
-class _GlobalEventFilter(QObject):
-    def __init__(self):
-        QObject.__init__(self)
-        self._events = {}
-
-    def register(self, event_type, callback):
-        self._events[event_type] = callback
-
-    def eventFilter(self, obj, event):
-        try:
-            cb = self._events[event.type()]
-        except KeyError:
-            return QObject.eventFilter(self, obj, event)
-        result = cb(obj, event)
-        if result is None:
-            return QObject.eventFilter(self, obj, event)
-        return result
-
-
-GLOBAL_EVENT_FILTER = _GlobalEventFilter()
-
-
-def register_global_event_callback(event_type, callback):
-    GLOBAL_EVENT_FILTER.register(event_type, callback)
-
-
 # handler for windows, to be able to list them and determine the one currently
 # active.
 class WindowsHandler(QObject):
@@ -67,6 +39,13 @@ class WindowsHandler(QObject):
         QObject.__init__(self, parent)
         self.windows = []
         self.current_window = None
+
+    def _on_last_window_closing(self):
+        # last window is closed, do not remove it from the list but exit the
+        # application. This is required from proper session saving.
+        from .application import app
+        app().quit()
+        return True
 
     def register_window(self, window):
         window.installEventFilter(self)
@@ -77,7 +56,11 @@ class WindowsHandler(QObject):
         if t == QEvent.WindowActivate:
             self.current_window = window
         elif t == QEvent.Close:
+            if window.quit_if_last_closed and len(self.windows) == 1:
+                if self._on_last_window_closing():
+                    return True
             self.windows.remove(window)
+            window.deleteLater()
             if window == self.current_window:
                 self.current_window = None
 
@@ -85,21 +68,6 @@ class WindowsHandler(QObject):
 
 
 WINDOWS_HANDLER = WindowsHandler()
-
-
-def _handle_app_click(obj, evt):
-    if not isinstance(obj, QWindow):
-        return
-
-    for win in windows():
-        for view in win.webviews():
-            if view.underMouse():
-                if view != win.current_web_view():
-                    view.set_current()
-                break
-
-
-register_global_event_callback(QEvent.MouseButtonPress, _handle_app_click)
 
 
 def windows():
@@ -122,7 +90,9 @@ def current_buffer():
     """
     Returns the current buffer.
     """
-    return current_window().current_web_view().buffer()
+    w = current_window()
+    if w:
+        return w.current_webview().buffer()
 
 
 def buffers():
@@ -134,11 +104,49 @@ def current_minibuffer():
     """
     Returns the current minibuffer.
     """
-    return current_window().minibuffer()
+    w = current_window()
+    if w:
+            return w.minibuffer()
 
 
 def minibuffer_show_info(text):
     """
     Display text information in the current minibuffer.
     """
-    current_minibuffer().show_info(text)
+    minibuffer = current_minibuffer()
+    if minibuffer:
+            minibuffer.show_info(text)
+
+
+def call_later(fn, msec=0):
+    """
+    Call the given function after the given time interval.
+
+    If msec is 0, the function call is still delayed to the next handling of
+    events in the qt event loop.
+    """
+    QTimer.singleShot(msec, fn)
+
+
+class CommandContext(object):
+    def __init__(self, sender, keypress, buffer=None):
+        self.sender = sender
+        self.keypress = keypress
+        self.buffer = buffer or current_buffer()
+        self.prompt = None
+
+    @property
+    def view(self):
+        return self.buffer.view()
+
+    @property
+    def window(self):
+        view = self.view
+        if view:
+            return view.main_window
+
+    @property
+    def minibuffer(self):
+        win = self.window
+        if win:
+            return win.minibuffer()

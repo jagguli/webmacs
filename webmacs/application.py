@@ -22,13 +22,18 @@ from PyQt5.QtCore import pyqtSlot as Slot
 from PyQt5.QtWebEngineWidgets import QWebEngineSettings
 from PyQt5.QtWebEngineCore import QWebEngineUrlRequestInterceptor
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtNetwork import QNetworkAccessManager
 
-from . import require, GLOBAL_EVENT_FILTER
+from . import require
 from .version import opengl_vendor
-from .adblock import Adblocker, AdblockUpdaterThread
+from .adblock import Adblocker, AdblockUpdateRunner
 from .download_manager import DownloadManager
 from .profile import default_profile
 from .minibuffer.right_label import init_minibuffer_right_labels
+from .keyboardhandler import LOCAL_KEYMAP_SETTER
+from .spell_checking import SpellCheckingUpdateRunner, \
+    spell_checking_dictionaries
+from .runnable import run
 
 
 if sys.platform.startswith("linux"):
@@ -72,6 +77,8 @@ def app():
 def _app_requires():
     require(".keymaps.global")
     require(".keymaps.caret_browsing")
+    require(".keymaps.content_edit")
+    require(".keymaps.fullscreen")
 
     require(".commands.follow")
     require(".commands.buffer_history")
@@ -79,6 +86,7 @@ def _app_requires():
     require(".commands.isearch")
     require(".commands.webbuffer")
     require(".commands.caret_browsing")
+    require(".commands.content_edit")
 
     require(".default_webjumps")
 
@@ -86,7 +94,7 @@ def _app_requires():
 class Application(QApplication):
     INSTANCE = None
 
-    def __init__(self, args):
+    def __init__(self, conf_path, args):
         QApplication.__init__(self, args)
         self.__class__.INSTANCE = self
 
@@ -102,23 +110,16 @@ class Application(QApplication):
                 " on your hardware."
             )
 
-        with open(os.path.join(THIS_DIR, "app_style.css")) as f:
-            self.setStyleSheet(f.read())
+        self._conf_path = conf_path
+        if not os.path.isdir(self.profiles_path()):
+            os.makedirs(self.profiles_path())
 
-        self._setup_conf_paths()
-
-        self._adblock_thread = None
         self._interceptor = UrlInterceptor(self)
-        self.adblock_update()
 
         self._download_manager = DownloadManager(self)
 
         self.profile = default_profile()
         self.profile.enable(self)
-
-        self.aboutToQuit.connect(self.profile.save_session)
-
-        self.installEventFilter(GLOBAL_EVENT_FILTER)
 
         settings = QWebEngineSettings.globalSettings()
         settings.setAttribute(
@@ -134,17 +135,11 @@ class Application(QApplication):
             QWebEngineSettings.JavascriptCanOpenWindows, True,
         )
 
-        _app_requires()
+        self.installEventFilter(LOCAL_KEYMAP_SETTER)
 
-    def _setup_conf_paths(self):
-        self._conf_path = os.path.join(os.path.expanduser("~"), ".webmacs")
+        self.setQuitOnLastWindowClosed(False)
 
-        def mkdir(path):
-            if not os.path.isdir(path):
-                os.makedirs(path)
-
-        mkdir(self.conf_path())
-        mkdir(self.profiles_path())
+        self.network_manager = QNetworkAccessManager(self)
 
     def conf_path(self):
         return self._conf_path
@@ -174,23 +169,30 @@ class Application(QApplication):
         return self.profile.ignored_certs
 
     def adblock_update(self):
-        if self._adblock_thread is not None:
-            return
+        def adblock_thread_finished(error, adblock):
+            if adblock:
+                self._interceptor.update_adblock(adblock)
 
         generator = Adblocker(self.adblock_path())
+        runner = AdblockUpdateRunner(generator,
+                                     on_finished=adblock_thread_finished)
+        run(runner)
 
-        def adblock_thread_finished():
-            self._adblock_thread.deleteLater()
-            self._adblock_thread = None
-            logging.debug("adblock update finished")
+    def update_spell_checking(self):
+        if not bool(spell_checking_dictionaries.value):
+            return
 
-        self._adblock_thread = AdblockUpdaterThread(generator)
-        self._adblock_thread.finished.connect(adblock_thread_finished)
-        self._adblock_thread.adblock_updated.connect(
-            self._interceptor.update_adblock
-        )
-        self._adblock_thread.start()
-        logging.debug("starting adblock update")
+        spell_check_path = os.path.join(self.applicationDirPath(),
+                                        "qtwebengine_dictionaries")
+
+        def spc_finished(*a):
+            self.profile.update_spell_checking()
+
+        runner = SpellCheckingUpdateRunner(spell_check_path,
+                                           on_finished=spc_finished)
+        run(runner)
 
     def post_init(self):
+        self.adblock_update()
+        self.update_spell_checking()
         init_minibuffer_right_labels()

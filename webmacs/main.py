@@ -19,13 +19,11 @@ import socket
 import logging
 import imp
 import sys
+import atexit
+import os
 
 from PyQt5.QtNetwork import QAbstractSocket
 
-from .webbuffer import create_buffer
-from .application import Application, app as _app
-from .window import Window
-from . import WINDOWS_HANDLER, current_window
 from .ipc import IpcServer
 
 
@@ -77,6 +75,9 @@ def parse_args(argv=None):
                         default="critical",
                         choices=("info", "warning", "error", "critical"))
 
+    parser.add_argument("-i", "--instance",
+                        help="Create or reuse a named webmacs instance.")
+
     parser.add_argument("url", nargs="?",
                         help="url to open")
 
@@ -96,18 +97,39 @@ def init(opts):
 
     :param opts: the result of the parsed command line.
     """
-    app = _app()
-    window = current_window()
-    if opts.url or not app.profile.load_session():
-        buffer = create_buffer(opts.url or "http://duckduckgo.com/")
-        window.current_web_view().setBuffer(buffer)
+    from .application import app
+    from .session import session_load, session_save
+    from .variables import get
+    from .window import Window
+    from .webbuffer import create_buffer
 
-    window.showMaximized()
+    a = app()
+    a.aboutToQuit.connect(lambda: session_save(a.profile.session_file))
+
+    def create_window(url):
+        w = Window()
+        buff = create_buffer(url)
+        w.current_webview().setBuffer(buff)
+        w.showMaximized()
+
+    home_page = get("home-page")
+    session_file = a.profile.session_file
+    if home_page:
+        create_window(home_page)
+    elif opts.url:
+        create_window(opts.url)
+    elif os.path.exists(session_file):
+        try:
+            session_load(session_file)
+        except Exception:
+            create_window("http://duckduckgo.com/")
 
 
 def _handle_user_init_error(msg):
     import traceback
-    conf_path = _app().conf_path()
+    from .application import app
+
+    conf_path = app().conf_path()
     stack_size = 0
     tbs = traceback.extract_tb(sys.exc_info()[2])
     for i, t in enumerate(tbs):
@@ -121,10 +143,16 @@ def _handle_user_init_error(msg):
 
 def main():
     opts = parse_args()
+
+    conf_path = os.path.join(os.path.expanduser("~"), ".webmacs")
+    if not os.path.isdir(conf_path):
+        os.makedirs(conf_path)
+
     setup_logging(getattr(logging, opts.log_level.upper()),
                   getattr(logging, opts.webcontent_log_level.upper()))
 
-    conn = IpcServer.check_server_connection()
+    conn = IpcServer.check_server_connection(opts.instance)
+
     if conn:
         conn.send_data(opts.__dict__)
         data = conn.get_data()
@@ -134,16 +162,15 @@ def main():
             print(msg)
         return
 
-    app = Application(["webmacs"])
-    server = IpcServer()
+    # Delay loading after command line parsing and ipc checking.
+    # Loading qwebengine stuff takes a couple of seconds...
+    from .application import Application, _app_requires
 
-    window = Window()
-    # register the window as being the current one
-    WINDOWS_HANDLER.current_window = window
+    _app_requires()
 
     # load a user init module if any
     try:
-        spec = imp.find_module("init", [app.conf_path()])
+        spec = imp.find_module("init", [conf_path])
     except ImportError:
         user_init = None
     else:
@@ -152,7 +179,16 @@ def main():
         except Exception:
             _handle_user_init_error("Error reading the user configuration.")
 
-    # and exectute its init function if there is one
+    app = Application(conf_path, [
+        # The first argument passed to the QApplication args defines
+        # the x11 property WM_CLASS.
+        "webmacs" if not opts.instance
+        else "webmacs-%s" % opts.instance
+    ])
+    server = IpcServer(opts.instance)
+    atexit.register(server.cleanup)
+
+    # execute the user init function if there is one
     if user_init is None or not hasattr(user_init, "init"):
         init(opts)
     else:
@@ -165,10 +201,7 @@ def main():
     app.post_init()
     signal_wakeup(app)
     signal.signal(signal.SIGINT, lambda s, h: app.quit())
-    try:
-        app.exec_()
-    finally:
-        server.cleanup()
+    sys.exit(app.exec_())
 
 
 if __name__ == '__main__':

@@ -15,8 +15,7 @@
 
 import json
 
-from PyQt5.QtCore import QObject, pyqtSlot as Slot, QEventLoop, \
-    pyqtSignal as Signal
+from PyQt5.QtCore import QObject, pyqtSlot as Slot, pyqtSignal as Signal
 
 from PyQt5.QtWebEngineWidgets import QWebEngineDownloadItem
 
@@ -41,10 +40,10 @@ def state_str(state):
 
 
 @DL_PROMPT_KEYMAP.define_key("C-g")
-def cancel_dl():
-    prompt = current_minibuffer().prompt()
+def cancel_dl(ctx):
+    prompt = ctx.minibuffer.prompt()
     prompt._dl.cancel()
-    cancel()
+    cancel(ctx)
     prompt.finished.emit()  # to end the event loop
 
 
@@ -56,7 +55,7 @@ class DlPrompt(Prompt):
     download_started = Signal(object)
 
     def __init__(self, dl):
-        Prompt.__init__(self)
+        Prompt.__init__(self, None)
         self._dl = dl
         self.label = "Download file [{}]:".format(dl.mimeType())
 
@@ -139,10 +138,6 @@ class DownloadManager(QObject):
             state = state_str(dl.state())
             minibuff.show_info("[{}] download: {}".format(state, dl.path()))
 
-        loop = QEventLoop()
-        prompt.finished.connect(loop.quit)
         dl.finished.connect(finished)
 
         minibuff.do_prompt(prompt)
-
-        loop.exec_()

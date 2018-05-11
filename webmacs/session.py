@@ -14,57 +14,105 @@
 # along with webmacs.  If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import logging
 
-from .import BUFFERS, current_window, windows
-from .webbuffer import (create_buffer, close_buffer, QUrl,
-                        DelayedLoadingUrl)
+from .import BUFFERS, windows, current_window
+from .webbuffer import create_buffer, QUrl, DelayedLoadingUrl, close_buffer
+from .window import Window
 
 
-class Session(object):
-    def __init__(self, urls=None):
-        if urls is None:
-            urls = [{
-                "url": b.url().toString(),
-                "title": b.title()
-            } for b in BUFFERS]
-        self.urls = urls
+FORMAT_VERSION = 1
 
-    @classmethod
-    def load(cls, stream):
-        data = json.load(stream)
-        return cls(urls=data["urls"])
 
-    def apply(self):
-        cwin = current_window()
+def _session_load(stream):
+    data = json.load(stream)
+    version = data.get("version", 0)
+    urls = data["urls"]
 
-        # close any opened window other than the current one
-        for win in windows():
-            if win != cwin:
-                win.close()
+    # apply the session config
 
-        # close any webview except the current one
-        cwin.close_other_views()
+    # now, load urls in buffers
+    for url in reversed(urls):
+        if isinstance(url, str):
+            # old format, no delay loading support
+            # TODO must be removed after some time
+            create_buffer(url)
+        else:
+            # new format, url must be a dict
+            create_buffer(DelayedLoadingUrl(
+                url=QUrl(url["url"]),
+                title=url["title"]
+            ))
 
-        # and close all the buffers
-        for buff in BUFFERS:
-            close_buffer(buff, keep_one=False)
+    if version > 0:
+        def create_window(wdata):
+            win = Window()
+            win.restore_state(wdata, version)
+            win.show()
 
-        # now, load urls in buffers
-        for url in reversed(self.urls):
-            if isinstance(url, str):
-                # old format, no delay loading support
-                # TODO must be removed after some time
-                create_buffer(url)
-            else:
-                # new format, url must be a dict
-                create_buffer(DelayedLoadingUrl(
-                    url=QUrl(url["url"]),
-                    title=url["title"]
-                ))
+        current_index = data.get("current-window", 0)
+        for i, wdata in enumerate(data["windows"]):
+            if i != current_index:
+                create_window(wdata)
+
+        # create the current last, so it has focus and is on top
+        create_window(data["windows"][current_index])
+
+    else:
+        cwin = Window()
+        cwin.showMaximized()
 
         # and open the first buffer in the view
         if BUFFERS:
-            cwin.current_web_view().setBuffer(BUFFERS[0])
+            cwin.current_webview().setBuffer(BUFFERS[0])
 
-    def save(self, stream):
-        json.dump({"urls": self.urls}, stream)
+
+def _session_save(stream):
+    urls = [{
+        "url": b.url().toString(),
+        "title": b.title()
+    } for b in BUFFERS]
+
+    json.dump({
+        "version": FORMAT_VERSION,
+        "urls": urls,
+        "windows": [w.dump_state() for w in windows()],
+        "current-window": windows().index(current_window()),
+    }, stream)
+
+
+def session_clean():
+    # clean every opened buffers and windows
+    for window in windows():
+        window.quit_if_last_closed = False
+        window.close()
+        for view in window.webviews():
+            view.setBuffer(None)
+
+    for buffer in BUFFERS:
+        close_buffer(buffer)
+
+
+def session_load(session_file):
+    """
+    Try to load the session, given the profile.
+
+    Must be called at application startup, when no buffers nor views is set up
+    already.
+    """
+    try:
+        with open(session_file, "r") as f:
+            _session_load(f)
+    except Exception:
+        logging.exception("Unable to load the session from %s.",
+                          session_file)
+        session_clean()
+        raise
+
+
+def session_save(session_file):
+    """
+    Save the session for the given profile.
+    """
+    with open(session_file, "w") as f:
+        _session_save(f)

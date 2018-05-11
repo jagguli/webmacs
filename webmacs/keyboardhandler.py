@@ -14,87 +14,78 @@
 # along with webmacs.  If not, see <http://www.gnu.org/licenses/>.
 
 import logging
-import weakref
 
-from PyQt5.QtCore import QObject, QEvent, pyqtSlot as Slot
+from PyQt5.QtCore import QObject, QEvent
 
 from .keymaps import KeyPress, global_keymap, CHAR2KEY
 from . import hooks
-from . import register_global_event_callback, COMMANDS, minibuffer_show_info
+from . import COMMANDS, minibuffer_show_info, CommandContext
+from .mode import Mode
 
 
 class LocalKeymapSetter(QObject):
     def __init__(self):
         QObject.__init__(self)
-        self._views = []
-        self._minibuffer_inputs = []
-        self._current_obj = None
+        self.enabled_minibuffer = False
 
-    def register_view(self, view):
-        view.installEventFilter(self)
-        self._views.append(view)
+    def eventFilter(self, obj, evt):
+        # event filter on the global app is required to avoid click on webviews
+        if self.enabled_minibuffer and evt.type() in (
+                QEvent.MouseButtonPress,
+                QEvent.MouseButtonDblClick,
+                QEvent.MouseButtonRelease,
+                QEvent.MouseMove):
+            return True
+        return False
 
-    def view_destroyed(self, view):
-        self._views.remove(view)
-
-    def register_minibuffer_input(self, minibuffer_input):
-        minibuffer_input.installEventFilter(self)
-        minibuffer_input.destroyed.connect(self._minibuffer_input_destroyed)
-        self._minibuffer_inputs.append(minibuffer_input)
-
-    @Slot(QObject)
-    def _minibuffer_input_destroyed(self, minibuffer_input):
-        # TODO FIXME this fails under integration testing.
-        try:
-            self._minibuffer_inputs.remove(minibuffer_input)
-        except ValueError:
-            pass
-
-    def eventFilter(self, obj, event):
-        t = event.type()
-        if t == QEvent.WindowActivate:
-            if obj in self._views:
-                # enable the current view's buffer
-                set_local_keymap(obj.buffer().active_keymap())
-        elif t == QEvent.FocusIn:
-            if obj in self._minibuffer_inputs:
-                # when the minibuffer input is shown, enable it
-                set_local_keymap(obj.keymap())
-        elif t == QEvent.FocusOut:
-            if obj in self._minibuffer_inputs:
-                # the focus is lost when the popup is active
-                if not obj.popup().isVisible():
-                    # when the minibuffer input is hidden, enable its view's
-                    # buffer
-                    buff = obj.parent().parent().current_web_view().buffer()
-                    set_local_keymap(buff.active_keymap())
-        return QObject.eventFilter(self, obj, event)
-
-    def web_content_edit_focus_changed(self, window, enabled):
-        buff = window.current_web_view().buffer()
+    def minibuffer_input_focus_changed(self, mb, enabled):
+        self.enabled_minibuffer = enabled
         if enabled:
-            buff.set_keymap_mode(buff.KEYMAP_MODE_CONTENT_EDIT)
-            set_local_keymap(buff.active_keymap())
+            set_local_keymap(mb.keymap())
         else:
-            buff.set_keymap_mode(buff.KEYMAP_MODE_NORMAL)
-            if not window.minibuffer().input().hasFocus():
-                buff = window.current_web_view().buffer()
+            if not mb.popup().isVisible():
+                # when the minibuffer input is hidden, enable its view's
+                # buffer
+                buff = mb.parent().parent().current_webview().buffer()
                 set_local_keymap(buff.active_keymap())
 
-    def caret_browsing_changed(self, window, enabled):
-        buff = window.current_web_view().buffer()
+    def view_focus_changed(self, view, enabled):
+        if enabled and not self.enabled_minibuffer:
+            # fixes issue were a raw qwebenginepage comes here. To
+            # reproduce, have two opened buffers, then C-x 2, C-x 3.
+            if hasattr(view.buffer(), "active_keymap"):
+                set_local_keymap(view.buffer().active_keymap())
+
+    def web_content_edit_focus_changed(self, buff, enabled):
         if enabled:
-            buff.set_keymap_mode(buff.KEYMAP_MODE_CARET_BROWSING)
+            buff.set_keymap_mode(Mode.KEYMAP_CONTENT_EDIT)
             set_local_keymap(buff.active_keymap())
         else:
-            buff.set_keymap_mode(buff.KEYMAP_MODE_NORMAL)
-            if not window.minibuffer().input().hasFocus():
+            buff.set_keymap_mode(Mode.KEYMAP_NORMAL)
+            if not self.enabled_minibuffer:
                 set_local_keymap(buff.active_keymap())
+
+    def caret_browsing_changed(self, buff, enabled):
+        if enabled:
+            buff.set_keymap_mode(Mode.KEYMAP_CARET_BROWSING)
+            set_local_keymap(buff.active_keymap())
+        else:
+            buff.set_keymap_mode(Mode.KEYMAP_NORMAL)
+            if not self.enabled_minibuffer:
+                set_local_keymap(buff.active_keymap())
+
+    def buffer_mode_changed(self, buffer, old_mode):
+        # check that the previous keymap was the one corresponding to the mode
+        old_km = old_mode.keymap_for_mode(buffer.keymap_mode)
+        if old_km == local_keymap():
+            set_local_keymap(buffer.active_keymap())
+
+    def buffer_opened_in_view(self, buffer):
+        if not self.enabled_minibuffer:
+            set_local_keymap(buffer.active_keymap())
 
 
 LOCAL_KEYMAP_SETTER = LocalKeymapSetter()
-hooks.webview_created.add(LOCAL_KEYMAP_SETTER.register_view)
-hooks.webview_closed.add(LOCAL_KEYMAP_SETTER.view_destroyed)
 
 
 class KeyEater(object):
@@ -102,10 +93,9 @@ class KeyEater(object):
     Handle Qt keypresses events.
     """
     def __init__(self):
+        self.set_call_handler(CallHandler())
         self._keypresses = []
-        self._commands = COMMANDS
         self._local_key_map = None
-        self.current_obj = None
         self._use_global_keymap = True
         self.universal_key = KeyPress.from_str("C-u")
         self._prefix_arg = None
@@ -114,6 +104,9 @@ class KeyEater(object):
         for i in "1234567890":
             self._allowed_universal_keys[CHAR2KEY[i]] \
                 = lambda: self._num_update_prefix_arg(i)
+
+    def set_call_handler(self, call_handler):
+        self.call_handler = call_handler
 
     def set_local_key_map(self, keymap):
         if keymap != self._local_key_map:
@@ -131,9 +124,9 @@ class KeyEater(object):
         key = KeyPress.from_qevent(event)
         if key is None:
             return False
-        self.current_obj = weakref.ref(obj)
-        if self._handle_keypress(key):
+        if self._handle_keypress(obj, key):
             return True
+        return False
 
     def active_keymaps(self):
         if self._local_key_map:
@@ -143,9 +136,6 @@ class KeyEater(object):
 
     def _add_keypress(self, keypress):
         self._keypresses.append(keypress)
-        minibuffer_show_info(
-            " ".join((str(k) for k in self._keypresses))
-        )
         logging.debug("keychord: %s" % self._keypresses)
 
     def _num_update_prefix_arg(self, numstr):
@@ -154,7 +144,12 @@ class KeyEater(object):
         else:
             self._prefix_arg = int(str(self._prefix_arg) + numstr)
 
-    def _handle_keypress(self, keypress):
+    def _show_info_kbd(self, extra=""):
+        minibuffer_show_info(
+            " ".join((str(k) for k in self._keypresses)) + extra
+        )
+
+    def _handle_keypress(self, sender, keypress):
         if self._reset_prefix_arg:
             self._reset_prefix_arg = False
             self._prefix_arg = None
@@ -164,7 +159,6 @@ class KeyEater(object):
             else:
                 self._prefix_arg = (4,)
                 self._keypresses = []
-            self._add_keypress(keypress)
             return True
         if self._prefix_arg is not None:
             try:
@@ -177,55 +171,65 @@ class KeyEater(object):
                     self._add_keypress(keypress)
                     return True
 
-        incomplete_keychord = False
-        command_called = False
+        result = None
         self._add_keypress(keypress)
 
         for keymap in self.active_keymaps():
             result = keymap.lookup(self._keypresses)
+            if result:
+                break
 
-            if result is None:
-                pass
-            elif not result.complete:
-                incomplete_keychord = True
-            else:
-                try:
-                    self._call_command(result.command)
-                except Exception:
-                    logging.exception("Error calling command:")
-                command_called = True
-
-        if command_called or not incomplete_keychord:
+        if not result:
+            if len(self._keypresses) > 1:
+                self._show_info_kbd(" is undefined.")
             self._keypresses = []
+            self.call_handler.no_call(sender, keymap, keypress)
+            return False
 
-        if command_called:
+        if result.complete:
+            self._show_info_kbd()
+            self._keypresses = []
             self._reset_prefix_arg = True
+            try:
+                self.call_handler.call(sender, keymap, keypress,
+                                       result.command)
+            except Exception:
+                logging.exception("Error calling command:")
+        else:
+            self._show_info_kbd(" -")
+            self.call_handler.partial_call(sender, keymap, keypress)
 
-        return command_called or incomplete_keychord
+        return result is not None
 
-    def _call_command(self, command):
+
+class CallHandler(object):
+    def __init__(self):
+        self._commands = COMMANDS
+
+    def call(self, sender, keymap, keypress, command):
         if isinstance(command, str):
             try:
                 command = self._commands[command]
             except KeyError:
                 raise KeyError("No such command: %s" % command)
 
-        command()
+        command(CommandContext(sender, keypress))
+
+    def no_call(self, sender, keymap, keypress):
+        pass
+
+    def partial_call(self, sender, keymap, keypress):
+        pass
 
 
 KEY_EATER = KeyEater()
-register_global_event_callback(QEvent.KeyPress, KEY_EATER.event_filter)
 
 
-def send_key_event(keypress):
-    obj = KEY_EATER.current_obj
-    if obj:
-        obj = obj()
-        if obj:
-            from .application import app as _app
-            app = _app()
-            app.postEvent(obj, keypress.to_qevent(QEvent.KeyPress))
-            app.postEvent(obj, keypress.to_qevent(QEvent.KeyRelease))
+def send_key_event(obj, keypress):
+    from .application import app as _app
+    app = _app()
+    app.postEvent(obj, keypress.to_qevent(QEvent.KeyPress))
+    app.postEvent(obj, keypress.to_qevent(QEvent.KeyRelease))
 
 
 def local_keymap():

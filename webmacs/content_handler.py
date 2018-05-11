@@ -17,11 +17,12 @@ import json
 
 from PyQt5.QtCore import QObject, pyqtSlot as Slot, pyqtSignal as Signal, \
     QUrl
+from PyQt5.QtWebEngineWidgets import QWebEngineScript
 
-from . import current_window
 from .keyboardhandler import LOCAL_KEYMAP_SETTER
 from .autofill import FormData
 from .application import app
+from .external_editor import open_external_editor
 
 
 class WebContentHandler(QObject):
@@ -36,26 +37,18 @@ class WebContentHandler(QObject):
 
     @Slot(bool)
     def onTextFocus(self, enabled):
-        win = current_window()
-        if win is not None:
-            LOCAL_KEYMAP_SETTER.web_content_edit_focus_changed(win, enabled)
+        LOCAL_KEYMAP_SETTER.web_content_edit_focus_changed(self.buffer,
+                                                           enabled)
 
     @Slot(bool)
     def onCaretBrowsing(self, enabled):
-        win = current_window()
-        if win is not None:
-            LOCAL_KEYMAP_SETTER.caret_browsing_changed(win, enabled)
+        LOCAL_KEYMAP_SETTER.caret_browsing_changed(self.buffer, enabled)
 
     @Slot(str)
     def _browserObjectActivated(self, obj):
         # It is hard to pass dict objects from javascript, so a string is used
         # and decoded here.
         self.browserObjectActivated.emit(json.loads(obj))
-
-    @Slot(str)
-    def onBufferFocus(self):
-        if self.buffer and self.buffer.view():
-            self.buffer.view().set_current()
 
     @Slot(str)
     def copyToClipboard(self, text):
@@ -66,3 +59,18 @@ class WebContentHandler(QObject):
         formdata = FormData(url=QUrl(url), username=username,
                             password=password, data=data)
         app().autofill().maybe_save_form_password(self.buffer, formdata)
+
+    @Slot(str, str)
+    def openExternalEditor(self, request_id, content):
+        new_content = open_external_editor(content.encode("utf-8"))
+        if new_content is None:
+            new_content = 'false'
+        else:
+            new_content = repr(new_content)
+        self.buffer.runJavaScript(
+            "textedit.external_editor_finish({}, {});".format(
+                repr(request_id),
+                new_content
+            ),
+            QWebEngineScript.ApplicationWorld
+        )

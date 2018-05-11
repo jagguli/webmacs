@@ -20,6 +20,7 @@ from PyQt5.QtGui import QKeyEvent
 
 KEY2CHAR = {}
 CHAR2KEY = {}
+KEYMAPS = {}
 
 
 def _set_key(key, char, *chars):
@@ -242,18 +243,25 @@ class KeyPress(_KeyPress):
     @classmethod
     def from_str(cls, string):
         ctrl, alt, super = False, False, False
-        parts = string.split("-")
-        for p in parts[:-1]:
-            if p == "C":
+        left, _, text = string.rpartition("-")
+        if text == "":
+            text = "-"
+        parts = left.split("-")
+        for p in parts:
+            if p == "":
+                break
+            elif p == "C":
                 ctrl = True
             elif p == "M":
                 alt = True
             elif p == "S":
                 super = True
             else:
-                raise Exception("Unknown key modifier: %s" % p)
+                raise Exception(
+                    "Unknown key modifier: %s in key definition %s"
+                    % (p, string)
+                )
 
-        text = parts[-1]
         try:
             key = CHAR2KEY[text]
         except KeyError:
@@ -309,16 +317,34 @@ class KeyPress(_KeyPress):
 
 
 KeymapLookupResult = namedtuple("KeymapLookupResult",
-                                ("complete", "command"))
+                                ("complete", "command", "keymap"))
 
 
-class Keymap(object):
-    __slots__ = ("name", "bindings", "parent")
+class InternalKeymap(object):
+    __slots__ = ("bindings", "parent")
 
-    def __init__(self, name=None, parent=None):
-        self.name = name
-        self.parent = parent
+    def __init__(self, parent=None):
         self.bindings = {}
+        self.parent = parent
+
+    def _traverse_commands(self, prefix, acc_fn):
+        for keypress, cmd in self.bindings.items():
+            new_prefix = prefix + [keypress]
+            if isinstance(cmd, InternalKeymap):
+                cmd._traverse_commands(new_prefix, acc_fn)
+            else:
+                acc_fn(new_prefix, cmd)
+        if self.parent:
+            for keypress, cmd in self.parent.bindings.items():
+                if keypress not in self.bindings:
+                    new_prefix = prefix + [keypress]
+                    if isinstance(cmd, InternalKeymap):
+                        cmd._traverse_commands(new_prefix, acc_fn)
+                    else:
+                        acc_fn(new_prefix, cmd)
+
+    def traverse_commands(self, acc_fn):
+        self._traverse_commands([], acc_fn)
 
     def _define_key(self, key, binding):
         keys = [KeyPress.from_str(k) for k in key.split()]
@@ -330,10 +356,10 @@ class Keymap(object):
         for keypress in keys[:-1]:
             if keypress in kmap.bindings:
                 othermap = kmap.bindings[keypress]
-                if not isinstance(othermap, Keymap):
-                    othermap = Keymap()
+                if not isinstance(othermap, InternalKeymap):
+                    othermap = InternalKeymap()
             else:
-                othermap = Keymap()
+                othermap = InternalKeymap()
             kmap.bindings[keypress] = othermap
             kmap = othermap
 
@@ -355,6 +381,21 @@ class Keymap(object):
         else:
             self._define_key(key, binding)
 
+    def undefine_key(self, key):
+        """
+        Undefine the binding under a key chord.
+
+        :param key: a string representing the key chord, such as "C-c x".
+        """
+        keys = [KeyPress.from_str(k) for k in key.split()]
+        if not keys:
+            return None
+        res = self.lookup(keys)
+        if res is not None and res.complete:
+            del res.keymap.bindings[keys[-1]]
+            return res.keymap
+        return None
+
     def _look_up(self, keypress):
         keymap = self
         while keymap:
@@ -370,27 +411,73 @@ class Keymap(object):
             while keymap:
                 entry = keymap.bindings.get(keypress)
                 if entry is not None:
-                    if isinstance(entry, Keymap):
+                    if isinstance(entry, InternalKeymap):
                         keymap = entry
                         partial_match = True
                         break
                     else:
-                        return KeymapLookupResult(True, entry)
+                        return KeymapLookupResult(True, entry, keymap)
                 keymap = keymap.parent
 
         if keymap is None:
             return None
         elif partial_match:
-            return KeymapLookupResult(False, None)
+            return KeymapLookupResult(False, None, keymap)
         else:
             return None
+
+
+class Keymap(InternalKeymap):
+    __slots__ = InternalKeymap.__slots__ + ("name", "doc")
+
+    def __init__(self, name, parent=None, doc=None):
+        InternalKeymap.__init__(self, parent=parent)
+        self.name = name
+        self.doc = doc
+        if self.name in KEYMAPS:
+            raise ValueError("A keymap named %s already exists."
+                             % self.name)
+        KEYMAPS[self.name] = self
 
     def __str__(self):
         return self.name
 
+    @property
+    def brief_doc(self):
+        if self.doc:
+            return self.doc.split("\n", 1)[0]
 
-GLOBAL_KEYMAP = Keymap("global")
-BUFFER_KEYMAP = Keymap("webbuffer")
+
+EMPTY_KEYMAP = Keymap("empty")
+
+GLOBAL_KEYMAP = Keymap("global", doc="""\
+The global keymap is always active.
+
+It act as a fallback to other keymaps, which are considered local. Only one
+local keymap can be active at a time. A binding is first searched in the
+currently active local keymap, and if not found the global keymap is used.
+
+Only bindings with modifiers should be bound to it, else it will be impossible
+to edit text inside the browser.""")
+
+BUFFER_KEYMAP = Keymap("webbuffer", doc="""\
+Local keymap activated when a web buffer is focused.\
+
+A web buffer is focused when there is no text editing, no caret browsing, or
+when the minibuffer input is not shown... It is enabled when no other local
+keymap is enabled.""")
+
+CONTENT_EDIT_KEYMAP = Keymap("webcontent-edit", doc="""\
+Local keymap activated when a webcontent field (input, textarea, ...) is \
+focused.""")
+
+CARET_BROWSING_KEYMAP = Keymap("caret-browsing", doc="""\
+Local keymap activated when you are navigating the webbuffer with a caret.\
+""")
+
+FULLSCREEN_KEYMAP = Keymap("video-fullscreen", doc="""\
+Local Keymap activated when a video is played full screen.
+""")
 
 
 def global_keymap():

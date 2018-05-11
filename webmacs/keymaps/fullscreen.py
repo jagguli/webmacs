@@ -13,19 +13,16 @@
 # You should have received a copy of the GNU General Public License
 # along with webmacs.  If not, see <http://www.gnu.org/licenses/>.
 
+from . import FULLSCREEN_KEYMAP
+from .. import current_window
 
-class Hook(list):
-    def call(self, *arg, **kwargs):
-        for callback in self:
-            callback(*arg, **kwargs)
-
-    __call__ = call
-
-    add = list.append
+from PyQt5.QtWebEngineWidgets import QWebEnginePage
 
 
-webbuffer_created = Hook()
-
-webbuffer_closed = Hook()
-
-local_mode_changed = Hook()
+@FULLSCREEN_KEYMAP.define_key("q")
+@FULLSCREEN_KEYMAP.define_key("C-g")
+@FULLSCREEN_KEYMAP.define_key("Esc")
+def exit_full_screen(ctx):
+    fw = current_window().fullscreen_window
+    if fw:
+        fw.internal_view.triggerPageAction(QWebEnginePage.ExitFullScreen)

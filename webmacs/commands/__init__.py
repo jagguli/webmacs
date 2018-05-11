@@ -13,23 +13,8 @@
 # You should have received a copy of the GNU General Public License
 # along with webmacs.  If not, see <http://www.gnu.org/licenses/>.
 
-from PyQt5.QtCore import QObject, pyqtSlot as Slot
 from ..minibuffer import Prompt
-from .. import COMMANDS, current_minibuffer
-
-
-class CommandExecutor(QObject):
-    """
-    Internal object to execute commands when a prompt is used.
-    """
-    def __init__(self, cmd, prompt):
-        QObject.__init__(self, prompt)
-        self.cmd = cmd
-        self.prompt = prompt
-
-    @Slot()
-    def call(self):
-        self.cmd(self.prompt)
+from .. import COMMANDS
 
 
 class InteractiveCommand(object):
@@ -52,15 +37,22 @@ class InteractiveCommand(object):
             assert issubclass(prompt, Prompt), \
                 "prompt should be a Prompt subclass"
 
-    def __call__(self):
+    def __call__(self, ctx):
         if self.prompt:
-            prompt = self.prompt()
-            # executor will be destroyed with its parent, the prompt
-            executor = CommandExecutor(self.binding, prompt)
-            prompt.finished.connect(executor.call)
-            current_minibuffer().do_prompt(prompt)
+            prompt = self.prompt(ctx)
+
+            def call():
+                ctx.prompt = prompt
+                try:
+                    self.binding(ctx)
+                finally:
+                    # to avoid reference cycle
+                    ctx.prompt = None
+
+            prompt.finished.connect(call)
+            ctx.minibuffer.do_prompt(prompt)
         else:
-            self.binding()
+            self.binding(ctx)
 
 
 def define_command(name, binding=None, **args):

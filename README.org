@@ -41,10 +41,11 @@ pip install -e <path_to_webmacs_sources>
 python -m webmacs.main
 #+END_SRC
 
-Or you can install it globally:
+Then you can create a system alias to run it:
 #+BEGIN_SRC bash
-cd <path_to_webmacs_sources>
-sudo pip3 install .
+sudo ln -s <path_to_venv>/bin/webmacs /usr/local/bin/webmacs
+# now you can use the webmacs command on your system, given that
+# /usr/local/bin is in your PATH.
 #+END_SRC
 
 
@@ -66,7 +67,7 @@ sudo pip3 install .
 - maximize view (shortcut *C-x 1*)
 - history access (shortcut *h*)
 - ad blocking using [[https://easylist.to/][easylist]]. Implemented in C for high
- performances.
+  performances.
 - for go-to and history command, the prefix *C-u* opens the url in a new
   buffer.
 - handle basic authentication
@@ -95,6 +96,9 @@ sudo pip3 install .
   navigate quickly using the incremental search, though this is working well
   with Qt >= 5.10.
 - bookmarks (*M* to add a bookmark, *m* to open the bookmark list)
+- zoom in and out, using *+* and *-*. *=* to reset the zoom.
+- zoom (text only) using *C-+*, *C--* and *C-=*.
+- edit text fields with an external editor (defaulting to emacsclient): *C-x e*
 
 
 * Documentation

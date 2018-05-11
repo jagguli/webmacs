@@ -13,217 +13,157 @@
 // You should have received a copy of the GNU General Public License
 // along with webmacs.  If not, see <http://www.gnu.org/licenses/>.
 
-var text_marks = {};
+var textedit = {};
+textedit.EXTERNAL_EDITOR_REQUESTS = {};
 
-var getActiveElement = function( doc ){
-    doc = doc || document;
 
-    var elt = doc.activeElement;
-    if (elt.tagName == 'IFRAME') {
-        return getActiveElement(elt.contentWindow.document);
-    }
-    return elt;
-};
-
-function set_or_unset_mark(e) {
-    let enabled = !has_mark(e);
-    if (!enabled) {
-        delete text_marks[e];
-        var pos = e.selectionDirection == "forward" ? e.selectionEnd : e.selectionStart;
-        e.setSelectionRange(pos, pos);
+textedit.clear_mark = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.clear_mark", null);
     } else {
-        text_marks[e] = true;
-    }
-}
-
-function has_mark(e) {
-    return text_marks[e];
-}
-
-function has_any_mark(e) {
-    return has_mark(e) || (e.selectionEnd < e.selectionStart);
-}
-
-function _move_char(e, way) {
-    let start = e.selectionStart;
-    let end = e.selectionEnd;
-    let direction = e.selectionDirection;
-    if (end > start) {
-        // there is a selection
-        if (direction == "forward") {
-            end = end + way;
+        if (! elt.isContentEditable) {
+	          var pos = elt.selectionDirection == "forward" ? elt.selectionEnd : elt.selectionStart;
+	          elt.setSelectionRange(pos, pos);
         } else {
-            start = start + way;
+	          let sel = document.getSelection();
+	          if (! sel.isCollapsed) {
+	              sel.collapse(sel.focusNode, sel.focusOffset);
+	          }
         }
     }
-    else if (has_mark(e)) {
-        // no selection yet, but in mark mode
-        if (way > 0) {
-            direction = "forward";
-            end = end + way;
-        } else {
-            direction = "backward";
-            start = start + way;
-        }
+}
+
+textedit.blur = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.blur", null);
     } else {
-        // no selection
-        direction = "none";
-        end = end + way;
-        start = end;
+        elt.blur();
     }
-    e.setSelectionRange(start, end, direction);
 }
 
-function forward_char(e) {
-    _move_char(e, 1);
-}
-
-function backward_char(e) {
-    _move_char(e, -1);
-}
-
-var LETTER_RE = /[A-Za-z0-9]/;
-
-String.prototype.nextWordPosition = function(startpos) {
-    var max = this.length;
-    var foundletter = false;
-    for (var i=startpos + 1; i < max; i++) {
-        var char = this.charAt(i);
-        if (char.search(LETTER_RE) != -1) {
-            foundletter = true;
-        }
-        else if (foundletter) {
-            return i;
-        }
-    }
-    return max;
-}
-
-String.prototype.prevWordPosition = function(startpos) {
-    var foundletter = false;
-    for (var i=startpos - 1; i>=0; i--) {
-        var char = this.charAt(i);
-        if (char.search(LETTER_RE) != -1) {
-            foundletter = true;
-        }
-        else if (foundletter) {
-            return i+1;
-        }
-    }
-    return 0;
-}
-
-function forward_word(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-    var next_word_pos = e.value.nextWordPosition(pos);
-    _move_char(e, next_word_pos - pos);
-}
-
-function backward_word(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-    var prev_word_pos = e.value.prevWordPosition(pos);
-    _move_char(e, prev_word_pos - pos);
-}
-
-function move_end_of_line(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-
-    var eolpos = e.value.indexOf("\n", pos);
-    if (eolpos == -1) eolpos = e.value.length;
-    _move_char(e, eolpos - pos);
-}
-
-function move_beginning_of_line(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-
-    var eolpos = e.value.lastIndexOf("\n", pos-1);
-    if (eolpos == -1) eolpos = 0;
-    else eolpos +=1;
-    _move_char(e, eolpos - pos);
-}
-
-function delete_char(e) {
-    var start = e.selectionStart, end = e.selectionEnd, pos;
-    if (e.selectionDirection == "forward") {
-        pos = end - (end - start);
+textedit.copy_text = function(reset_selection) {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.copy_text", null);
     } else {
-        pos = start;
+        let sel = document.getSelection();
+        if (sel.type !== 'Range') {
+	          return;
+        }
+        post_webmacs_message("copyToClipboard", [sel.toString()]);
+        if (reset_selection) {
+	          textedit.clear_mark();
+        }
     }
-    if (end == start) {
-        end = end + 1;
+}
+
+textedit.select_text = function(direction, granularity) {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.select_text", null);
+    } else {
+        textedit.clear_mark();
+        document.getSelection().modify("extend", direction, granularity);
     }
-    delete text_marks[e];
-    var txt = e.value.slice(0, start) + e.value.slice(end);
-    e.value = txt;
-    e.setSelectionRange(pos, pos);
 }
 
-function delete_word(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-    delete text_marks[e];
-    var txt = e.value.slice(0, pos) +
-        e.value.slice(e.value.nextWordPosition(pos));
-    e.value = txt;
-    e.setSelectionRange(pos, pos);
-}
-
-function delete_word_backward(e) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-    delete text_marks[e];
-    var delpos = e.value.prevWordPosition(pos);
-    var txt = e.value.slice(0, delpos) + e.value.slice(pos);
-    e.value = txt;
-    e.setSelectionRange(delpos, delpos);
-}
-
-function copy_text(e, delselection) {
-    var start = e.selectionStart, end = e.selectionEnd, pos;
-    pos = e.selectionDirection == "forward" ? end : start;
-    delete text_marks[e];
-    if (start == end) { return; }
-    var txt = e.value;
-    __webmacsHandler__.copyToClipboard(txt.slice(start, end));
-    if (delselection) {
-        txt = txt.slice(0, start) + txt.slice(end);
-        e.value = txt;
+textedit._change_next_word_case = function(fn) {
+    let elt = document.activeElement;
+    textedit.select_text('forward', 'word');
+    if (elt.isContentEditable) {
+	      return;
     }
-    e.setSelectionRange(pos, pos);
+    var pos = elt.selectionStart;
+    var txt = elt.value;
+    var nextpos = elt.selectionEnd;
+    elt.value = txt.slice(0, pos) + fn(txt.slice(pos, nextpos))
+	      + txt.slice(nextpos);
+    elt.setSelectionRange(nextpos, nextpos);
 }
 
-function _change_next_word_case(e, fn) {
-    var pos = e.selectionDirection == "forward" ? e.selectionEnd :
-        e.selectionStart;
-    delete text_marks[e];
-    var txt = e.value;
-    var nextpos = txt.nextWordPosition(pos);
-    e.value = txt.slice(0, pos) + fn(txt.slice(pos, nextpos))
-	+ txt.slice(nextpos);
-    e.setSelectionRange(nextpos, nextpos);
+textedit.upcase_word = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.upcase_word", null);
+    } else {
+        textedit._change_next_word_case(function(t) {
+	          return t.toUpperCase();
+        });
+    }
 }
 
-
-function upcase_word(e) {
-    _change_next_word_case(e, function(t) { return t.toUpperCase() });
+textedit.downcase_word = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.downcase_word", null);
+    } else {
+        textedit._change_next_word_case(function(t) {
+	          return t.toLowerCase();
+        });
+    }
 }
 
-function downcase_word(e) {
-    _change_next_word_case(e, function(t) { return t.toLowerCase() });
+textedit.capitalize_word = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.capitalize_word", null);
+    } else {
+        textedit._change_next_word_case(function(t) {
+	          return t.toLowerCase().replace(/(?:^|\s)\S/g, function(a) {
+	              return a.toUpperCase();
+	          });
+        });
+    }
 }
 
-function capitalize_word(e) {
-    _change_next_word_case(e, function(t) {
-	var startword = t.prevWordPosition(t.length - 1);
-	if (startword > 0) {
-	    return t.slice(0, startword) + t.charAt(startword).toUpperCase()
-		+ t.slice(startword + 1).toLowerCase();
-	} else {
-	    return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
-	}
-    });
+textedit.external_editor_open = function() {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.external_editor_open", null);
+    } else {
+        var id = new Date().getUTCMilliseconds() + "";
+        let txt = (elt.isContentEditable) ?
+	          elt.innerText : elt.value;
+        post_webmacs_message("openExternalEditor", [id, txt]);
+        textedit.EXTERNAL_EDITOR_REQUESTS[id] = elt;
+    }
+}
+
+textedit.external_editor_finish = function(id, content) {
+    let elt = document.activeElement;
+    if (elt.tagName == "IFRAME") {
+        post_message(elt.contentWindow, "textedit.external_editor_finish", [id, content]);
+    } else {
+        textedit._external_editor_finish([id, content]);
+    }
+}
+
+textedit._external_editor_finish = function(args) {
+    let id = args[0];
+    let content = args[1];
+
+    if (content !== false) {
+	      let e = textedit.EXTERNAL_EDITOR_REQUESTS[id];
+	      if (e.isContentEditable) {
+	          e.innerText = content;
+	      } else {
+	          e.value = content;
+	      }
+    }
+    delete textedit.EXTERNAL_EDITOR_REQUESTS[id];
+}
+
+if (self !== top) {
+    register_message_handler("textedit.clear_mark", textedit.clear_mark);
+    register_message_handler("textedit.blur", textedit.blur);
+    register_message_handler("textedit.copy_text", textedit.copy_text);
+    register_message_handler("textedit.select_text", textedit.select_text);
+    register_message_handler("textedit.upcase_word", textedit.upcase_word);
+    register_message_handler("textedit.downcase_word", textedit.downcase_word);
+    register_message_handler("textedit.external_editor_open",
+                             textedit.external_editor_open);
+    register_message_handler("textedit.external_editor_finish",
+                             textedit._external_editor_finish);
 }
